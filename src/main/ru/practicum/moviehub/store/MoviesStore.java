@@ -31,6 +31,7 @@ public class MoviesStore {
     public boolean removeById(int id) {
         return movies.removeIf(m -> m.getId() == id);
     }
+
     public void clear() {
         movies.clear();
     }

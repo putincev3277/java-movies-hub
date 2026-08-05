@@ -3,20 +3,20 @@ package ru.practicum.moviehub.http;
 import com.google.gson.Gson;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
-import ru.practicum.moviehub.api.ErrorResponse;
 import ru.practicum.moviehub.model.Movie;
 import ru.practicum.moviehub.store.MoviesStore;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Year;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
 public class MoviesHandler extends BaseHttpHandler implements HttpHandler {
 
-    private static final Gson GSON = new Gson();
     private final MoviesStore store;
+    private static final Gson GSON = new Gson();
 
     public MoviesHandler(MoviesStore store) {
         this.store = store;
@@ -28,11 +28,11 @@ public class MoviesHandler extends BaseHttpHandler implements HttpHandler {
         String path = ex.getRequestURI().getPath();
         String query = ex.getRequestURI().getRawQuery();
 
+        // Проверка разрешённых методов для путей /movies и /movies/{id}
         if (path.equals("/movies") || path.matches("/movies/\\d+")) {
             if (!"GET".equalsIgnoreCase(method)
                     && !"POST".equalsIgnoreCase(method)
                     && !"DELETE".equalsIgnoreCase(method)) {
-                // Неподдерживаемый метод → 405
                 sendError(ex, 405, "Method not allowed");
                 return;
             }
@@ -48,12 +48,7 @@ public class MoviesHandler extends BaseHttpHandler implements HttpHandler {
                     }
                     int year = Integer.parseInt(yearStr);
 
-                    List<Movie> filtered = new ArrayList<>();
-                    for (Movie m : store.getAll()) {
-                        if (m.getYear() == year) {
-                            filtered.add(m);
-                        }
-                    }
+                    List<Movie> filtered = store.getByYear(year);
                     sendJson(ex, 200, GSON.toJson(filtered));
                     return;
                 } catch (NumberFormatException e) {
@@ -78,7 +73,6 @@ public class MoviesHandler extends BaseHttpHandler implements HttpHandler {
             try {
                 id = Integer.parseInt(path.substring("/movies/".length()));
             } catch (NumberFormatException e) {
-                // Некорректный ID (не число) → 400 Bad Request
                 sendError(ex, 400, "Некорректный ID");
                 return;
             }
@@ -87,12 +81,10 @@ public class MoviesHandler extends BaseHttpHandler implements HttpHandler {
             if (opt.isPresent()) {
                 sendJson(ex, 200, GSON.toJson(opt.get()));
             } else {
-                // Фильм не найден → 404 Not Found с единым форматом ошибки
-                sendErrorWithDetails(ex, 404, "Фильм не найден", List.of("Фильм не найден"));
+                sendErrorWithDetails(ex, 404, "Фильм с ID " + id + " не найден", List.of("Фильм не найден"));
             }
             return;
         }
-
 
         // 4. DELETE /movies/{id}
         if ("DELETE".equalsIgnoreCase(method) && path.matches("/movies/\\d+")) {
@@ -100,23 +92,18 @@ public class MoviesHandler extends BaseHttpHandler implements HttpHandler {
             try {
                 id = Integer.parseInt(path.substring("/movies/".length()));
             } catch (NumberFormatException e) {
-                // Если ID не число — 400 Bad Request
                 sendError(ex, 400, "Некорректный ID");
                 return;
             }
 
             boolean removed = store.removeById(id);
             if (removed) {
-                // Успешное удаление: 204 No Content, без тела
                 ex.sendResponseHeaders(204, -1);
-                // Важно: НЕ пишем ничего в response body
             } else {
-                // Фильм не найден: 404 + корректный формат ошибки
-                sendErrorWithDetails(ex, 404, "Фильм не найден", List.of("Фильм не найден"));
+                sendErrorWithDetails(ex, 404, "Фильм с ID " + id + " не найден", List.of("Фильм не найден"));
             }
             return;
         }
-
 
         // 5. Если путь начинается с /movies, но не подошёл под наши шаблоны
         if (path.startsWith("/movies")) {
@@ -136,7 +123,6 @@ public class MoviesHandler extends BaseHttpHandler implements HttpHandler {
     private void handlePost(HttpExchange ex) throws IOException {
         String contentTypeHeader = ex.getRequestHeaders().getFirst("Content-Type");
         if (contentTypeHeader == null || !contentTypeHeader.startsWith("application/json")) {
-            // Требование: 415 Unsupported Media Type
             sendErrorWithDetails(ex, 415, "Unsupported Media Type",
                     List.of("Content-Type должен быть application/json"));
             return;
@@ -162,15 +148,13 @@ public class MoviesHandler extends BaseHttpHandler implements HttpHandler {
 
         List<String> details = new ArrayList<>();
 
-        // Валидация title
         if (movie.getTitle() == null || movie.getTitle().isBlank()) {
             details.add("название не должно быть пустым");
         } else if (movie.getTitle().length() > 100) {
             details.add("длина названия не должна превышать 100 символов");
         }
 
-        // Валидация year
-        int currentYear = java.time.Year.now().getValue();
+        int currentYear = Year.now().getValue();
         int minValidYear = 1888;
         int maxValidYear = currentYear + 1;
         int year = movie.getYear();
@@ -179,52 +163,12 @@ public class MoviesHandler extends BaseHttpHandler implements HttpHandler {
             details.add("год должен быть между " + minValidYear + " и " + maxValidYear);
         }
 
-        // Если есть ошибки валидации — 422 с details
         if (!details.isEmpty()) {
             sendErrorWithDetails(ex, 422, "Ошибка валидации", details);
             return;
         }
 
-        // Успешное добавление: 201 Created, тело — фильм с ID
-        Movie added = store.add(movie); // Предполагается, что store присваивает ID и возвращает объект с ним
+        Movie added = store.add(movie);
         sendJson(ex, 201, GSON.toJson(added));
-    }
-
-
-    /**
-     * Отправляет JSON-ответ (успех или ошибка) с правильным Content-Type.
-     */
-    protected void sendJson(HttpExchange ex, int statusCode, String jsonBody) throws IOException {
-        byte[] bytes = jsonBody.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        ex.getResponseHeaders().set("Content-Type", "application/json; charset=UTF-8");
-        ex.sendResponseHeaders(statusCode, bytes.length);
-        try (var os = ex.getResponseBody()) {
-            os.write(bytes);
-        }
-    }
-
-    /**
-     * Формирует и отправляет JSON-ответ об ошибке через Gson (без ручного экранирования).
-     */
-    private void sendErrorWithDetails(
-            HttpExchange ex,
-            int statusCode,
-            String errorMessage,
-            List<String> details
-    ) throws IOException {
-        ErrorResponse response = new ErrorResponse(errorMessage, details);
-        String json = GSON.toJson(response);
-        byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
-
-        ex.getResponseHeaders().set("Content-Type", "application/json; charset=UTF-8");
-        ex.sendResponseHeaders(statusCode, bytes.length);
-        try (var os = ex.getResponseBody()) {
-            os.write(bytes);
-        }
-    }
-
-
-    private void sendError(HttpExchange ex, int statusCode, String message) throws IOException {
-        sendErrorWithDetails(ex, statusCode, "Error", List.of(message));
     }
 }
